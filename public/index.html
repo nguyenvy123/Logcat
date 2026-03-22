@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Logcat Streamer</title>
+  <style>
+    /* ── Reset & Base ── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: #0d1117;
+      --surface: #161b22;
+      --border: #30363d;
+      --text: #c9d1d9;
+      --text-dim: #6e7681;
+      --accent: #58a6ff;
+      --green: #3fb950;
+      --yellow: #d29922;
+      --red: #f85149;
+      --purple: #bc8cff;
+      --orange: #ffa657;
+      --font-mono: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+    }
+    body { background: var(--bg); color: var(--text); font-family: var(--font-mono); font-size: 13px; display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+
+    /* ── Toolbar ── */
+    #toolbar {
+      display: flex; align-items: center; gap: 8px; padding: 8px 12px;
+      background: var(--surface); border-bottom: 1px solid var(--border);
+      flex-shrink: 0; flex-wrap: wrap;
+    }
+    #toolbar h1 { font-size: 14px; font-weight: 600; color: var(--accent); margin-right: 4px; white-space: nowrap; }
+    .sep { width: 1px; height: 20px; background: var(--border); }
+
+    /* ── Search ── */
+    #search {
+      flex: 1; min-width: 160px; max-width: 320px;
+      background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+      color: var(--text); padding: 4px 10px; font-family: var(--font-mono); font-size: 12px;
+      outline: none;
+    }
+    #search:focus { border-color: var(--accent); }
+
+    /* ── Level Filter Buttons ── */
+    .level-btn {
+      padding: 3px 8px; border-radius: 4px; border: 1px solid var(--border);
+      background: transparent; color: var(--text-dim); cursor: pointer;
+      font-family: var(--font-mono); font-size: 11px; font-weight: 600;
+      transition: all .15s;
+    }
+    .level-btn.active { border-color: currentColor; }
+    .level-btn[data-level="V"].active { color: var(--text-dim); background: rgba(110,118,129,.2); }
+    .level-btn[data-level="D"].active { color: var(--accent); background: rgba(88,166,255,.15); }
+    .level-btn[data-level="I"].active { color: var(--green); background: rgba(63,185,80,.15); }
+    .level-btn[data-level="W"].active { color: var(--yellow); background: rgba(210,153,34,.15); }
+    .level-btn[data-level="E"].active { color: var(--red); background: rgba(248,81,73,.15); }
+    .level-btn[data-level="F"].active { color: var(--purple); background: rgba(188,140,255,.2); }
+
+    /* ── Action Buttons ── */
+    .btn {
+      padding: 4px 10px; border-radius: 6px; border: 1px solid var(--border);
+      background: var(--surface); color: var(--text); cursor: pointer;
+      font-family: var(--font-mono); font-size: 12px; transition: all .15s; white-space: nowrap;
+    }
+    .btn:hover { border-color: var(--accent); color: var(--accent); }
+    .btn.danger:hover { border-color: var(--red); color: var(--red); }
+    .btn.success { border-color: var(--green); color: var(--green); }
+    .btn.warning { border-color: var(--yellow); color: var(--yellow); }
+
+    /* ── Stats Bar ── */
+    #stats-bar {
+      display: flex; align-items: center; gap: 16px; padding: 4px 12px;
+      background: var(--surface); border-bottom: 1px solid var(--border);
+      flex-shrink: 0; font-size: 11px; color: var(--text-dim);
+    }
+    #stats-bar span b { color: var(--text); }
+    #ws-status { margin-left: auto; font-weight: 600; }
+    #ws-status.connected { color: var(--green); }
+    #ws-status.disconnected { color: var(--red); }
+    #ws-status.connecting { color: var(--yellow); }
+
+    /* ── Log Container ── */
+    #log-container {
+      flex: 1; overflow-y: auto; overflow-x: hidden;
+      padding: 4px 0; scroll-behavior: smooth;
+    }
+    #log-container::-webkit-scrollbar { width: 6px; }
+    #log-container::-webkit-scrollbar-track { background: var(--bg); }
+    #log-container::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+    /* ── Log Row ── */
+    .log-row {
+      display: flex; align-items: flex-start; gap: 0;
+      padding: 1px 12px; line-height: 1.5;
+      border-left: 2px solid transparent;
+      transition: background .05s;
+    }
+    .log-row:hover { background: rgba(255,255,255,.03); }
+    .log-row.hidden { display: none; }
+
+    .log-row.level-W { border-color: var(--yellow); }
+    .log-row.level-E { border-color: var(--red); background: rgba(248,81,73,.05); }
+    .log-row.level-F { border-color: var(--purple); background: rgba(188,140,255,.08); }
+
+    .col-ts { color: var(--text-dim); min-width: 160px; flex-shrink: 0; font-size: 11px; padding-right: 8px; }
+    .col-level { min-width: 20px; flex-shrink: 0; font-weight: 700; text-align: center; margin-right: 6px; }
+    .col-tag { min-width: 120px; max-width: 180px; flex-shrink: 0; color: var(--orange); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-right: 8px; }
+    .col-msg { flex: 1; word-break: break-all; white-space: pre-wrap; }
+
+    /* Level colors */
+    .lv-V .col-level { color: var(--text-dim); }
+    .lv-D .col-level { color: var(--accent); }
+    .lv-I .col-level { color: var(--green); }
+    .lv-W .col-level { color: var(--yellow); }
+    .lv-E .col-level { color: var(--red); }
+    .lv-F .col-level { color: var(--purple); }
+
+    .lv-W .col-msg { color: var(--yellow); }
+    .lv-E .col-msg { color: #ff8080; }
+    .lv-F .col-msg { color: var(--purple); font-weight: 600; }
+
+    /* Search highlight */
+    mark { background: rgba(255,210,0,.3); color: inherit; border-radius: 2px; }
+
+    /* ── Empty State ── */
+    #empty-state {
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      height: 100%; color: var(--text-dim); gap: 8px; user-select: none;
+    }
+    #empty-state .icon { font-size: 40px; }
+
+    /* ── Telegram Badge ── */
+    #tg-badge {
+      padding: 3px 8px; border-radius: 12px; font-size: 11px; cursor: pointer;
+      border: 1px solid var(--border); background: transparent; font-family: var(--font-mono);
+      transition: all .15s;
+    }
+    #tg-badge.on  { color: var(--accent); border-color: var(--accent); background: rgba(88,166,255,.1); }
+    #tg-badge.off { color: var(--text-dim); }
+    #tg-badge.no  { color: var(--text-dim); cursor: default; opacity: .5; }
+  </style>
+</head>
+<body>
+
+<div id="toolbar">
+  <h1>📡 Logcat</h1>
+  <div class="sep"></div>
+  <input id="search" type="text" placeholder="Search logs…" autocomplete="off" spellcheck="false" />
+  <div class="sep"></div>
+  <!-- Level toggle buttons -->
+  <button class="level-btn active" data-level="V">V</button>
+  <button class="level-btn active" data-level="D">D</button>
+  <button class="level-btn active" data-level="I">I</button>
+  <button class="level-btn active" data-level="W">W</button>
+  <button class="level-btn active" data-level="E">E</button>
+  <button class="level-btn active" data-level="F">F</button>
+  <div class="sep"></div>
+  <button id="tg-badge" class="no" title="Toggle Telegram forwarding">✈ TG: –</button>
+  <button class="btn" id="btn-auto-scroll" title="Toggle auto-scroll">⬇ Auto</button>
+  <button class="btn danger" id="btn-clear">🗑 Clear</button>
+  <button class="btn" id="btn-restart-adb">↺ ADB</button>
+</div>
+
+<div id="stats-bar">
+  <span>Rows: <b id="stat-total">0</b></span>
+  <span>Shown: <b id="stat-shown">0</b></span>
+  <span>W: <b id="stat-w" style="color:var(--yellow)">0</b></span>
+  <span>E: <b id="stat-e" style="color:var(--red)">0</b></span>
+  <span>F: <b id="stat-f" style="color:var(--purple)">0</b></span>
+  <span id="ws-status" class="connecting">● Connecting…</span>
+</div>
+
+<div id="log-container">
+  <div id="empty-state">
+    <div class="icon">📋</div>
+    <div>Waiting for logcat…</div>
+  </div>
+</div>
+
+<script>
+// ── State ──────────────────────────────────────────────────────────────────
+let autoScroll = true;
+let searchTerm = '';
+let activeFilters = new Set(['V', 'D', 'I', 'W', 'E', 'F']);
+let telegramEnabled = false;
+let telegramConfigured = false;
+let stats = { total: 0, w: 0, e: 0, f: 0, shown: 0 };
+let ws = null;
+let reconnectTimer = null;
+
+const container = document.getElementById('log-container');
+const emptyState = document.getElementById('empty-state');
+const wsStatus = document.getElementById('ws-status');
+const tgBadge = document.getElementById('tg-badge');
+
+// ── WebSocket ──────────────────────────────────────────────────────────────
+function connect() {
+  const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${protocol}://${location.host}`);
+
+  ws.onopen = () => {
+    setWsStatus('connected', '● Connected');
+    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+  };
+
+  ws.onclose = () => {
+    setWsStatus('disconnected', '● Disconnected');
+    reconnectTimer = setTimeout(connect, 3000);
+  };
+
+  ws.onerror = () => setWsStatus('connecting', '● Reconnecting…');
+
+  ws.onmessage = (evt) => {
+    try { handleMessage(JSON.parse(evt.data)); } catch (_) {}
+  };
+}
+
+function handleMessage(msg) {
+  switch (msg.type) {
+    case 'config':
+      telegramConfigured = msg.data.telegramConfigured;
+      telegramEnabled = msg.data.telegramEnabled;
+      updateTgBadge();
+      break;
+    case 'history':
+      msg.data.forEach(appendLog);
+      break;
+    case 'log':
+      appendLog(msg.data);
+      break;
+    case 'cleared':
+      container.querySelectorAll('.log-row').forEach(el => el.remove());
+      stats = { total: 0, w: 0, e: 0, f: 0, shown: 0 };
+      updateStats();
+      showEmpty(true);
+      break;
+    case 'adb_error':
+    case 'adb_closed':
+      appendSystemMsg(msg.type === 'adb_error' ? `⚠ ADB: ${msg.data}` : `⚠ ADB closed (code ${msg.data?.code})`);
+      break;
+    case 'telegram_toggled':
+      telegramEnabled = msg.data.enabled;
+      updateTgBadge();
+      break;
+  }
+}
+
+// ── Log Rendering ──────────────────────────────────────────────────────────
+function appendLog(entry) {
+  showEmpty(false);
+
+  stats.total++;
+  if (entry.level === 'W') stats.w++;
+  if (entry.level === 'E') stats.e++;
+  if (entry.level === 'F') stats.f++;
+
+  const row = document.createElement('div');
+  row.className = `log-row level-${entry.level} lv-${entry.level}`;
+  row.dataset.level = entry.level;
+  row.dataset.raw = `${entry.tag} ${entry.message}`.toLowerCase();
+
+  const visible = isVisible(entry.level, row.dataset.raw);
+  if (!visible) row.classList.add('hidden');
+  else stats.shown++;
+
+  row.innerHTML = `
+    <span class="col-ts">${escHtml(entry.timestamp || '')}</span>
+    <span class="col-level">${entry.level}</span>
+    <span class="col-tag" title="${escHtml(entry.tag)}">${escHtml(entry.tag)}</span>
+    <span class="col-msg">${highlight(escHtml(entry.message))}</span>
+  `;
+
+  container.appendChild(row);
+  updateStats();
+  if (autoScroll && visible) row.scrollIntoView({ block: 'end' });
+}
+
+function appendSystemMsg(text) {
+  const row = document.createElement('div');
+  row.className = 'log-row';
+  row.style.cssText = 'color:var(--text-dim);font-style:italic;';
+  row.innerHTML = `<span class="col-msg">${escHtml(text)}</span>`;
+  container.appendChild(row);
+  if (autoScroll) row.scrollIntoView({ block: 'end' });
+}
+
+// ── Filtering ──────────────────────────────────────────────────────────────
+function isVisible(level, rawLower) {
+  if (!activeFilters.has(level)) return false;
+  if (searchTerm && !rawLower.includes(searchTerm)) return false;
+  return true;
+}
+
+function refilter() {
+  let shown = 0;
+  container.querySelectorAll('.log-row[data-level]').forEach(row => {
+    const visible = isVisible(row.dataset.level, row.dataset.raw || '');
+    row.classList.toggle('hidden', !visible);
+    if (visible) shown++;
+
+    // Re-highlight search in visible rows
+    const msgEl = row.querySelector('.col-msg');
+    if (msgEl && row.dataset.origMsg !== undefined) {
+      msgEl.innerHTML = highlight(escHtml(row.dataset.origMsg));
+    }
+  });
+  stats.shown = shown;
+  updateStats();
+}
+
+// Store original message for re-highlight
+function highlight(escaped) {
+  if (!searchTerm) return escaped;
+  const re = new RegExp(escRegex(searchTerm), 'gi');
+  return escaped.replace(re, m => `<mark>${m}</mark>`);
+}
+
+// ── Stats ──────────────────────────────────────────────────────────────────
+function updateStats() {
+  document.getElementById('stat-total').textContent = stats.total;
+  document.getElementById('stat-shown').textContent = stats.shown;
+  document.getElementById('stat-w').textContent = stats.w;
+  document.getElementById('stat-e').textContent = stats.e;
+  document.getElementById('stat-f').textContent = stats.f;
+}
+
+// ── Helpers ────────────────────────────────────────────────────────────────
+function setWsStatus(cls, text) {
+  wsStatus.className = `ws-status ${cls}`;
+  wsStatus.id = 'ws-status';
+  wsStatus.textContent = text;
+}
+
+function showEmpty(show) {
+  emptyState.style.display = show ? 'flex' : 'none';
+}
+
+function updateTgBadge() {
+  if (!telegramConfigured) {
+    tgBadge.className = 'no';
+    tgBadge.textContent = '✈ TG: –';
+  } else if (telegramEnabled) {
+    tgBadge.className = 'on';
+    tgBadge.textContent = '✈ TG: ON';
+  } else {
+    tgBadge.className = 'off';
+    tgBadge.textContent = '✈ TG: OFF';
+  }
+}
+
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function escRegex(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// ── Event Handlers ─────────────────────────────────────────────────────────
+document.getElementById('search').addEventListener('input', (e) => {
+  searchTerm = e.target.value.trim().toLowerCase();
+  refilter();
+});
+
+document.querySelectorAll('.level-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const lvl = btn.dataset.level;
+    if (activeFilters.has(lvl)) {
+      activeFilters.delete(lvl);
+      btn.classList.remove('active');
+    } else {
+      activeFilters.add(lvl);
+      btn.classList.add('active');
+    }
+    refilter();
+  });
+});
+
+document.getElementById('btn-auto-scroll').addEventListener('click', (e) => {
+  autoScroll = !autoScroll;
+  e.target.classList.toggle('success', autoScroll);
+  e.target.textContent = autoScroll ? '⬇ Auto ✓' : '⬇ Auto';
+});
+
+document.getElementById('btn-clear').addEventListener('click', () => {
+  fetch('/api/history/clear', { method: 'POST' });
+});
+
+document.getElementById('btn-restart-adb').addEventListener('click', () => {
+  fetch('/api/logcat/restart', { method: 'POST' });
+  appendSystemMsg('↺ ADB logcat restarting…');
+});
+
+tgBadge.addEventListener('click', () => {
+  if (!telegramConfigured) return;
+  fetch('/api/telegram/toggle', { method: 'POST' });
+});
+
+// Pause auto-scroll when user manually scrolls up
+container.addEventListener('scroll', () => {
+  const atBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 40;
+  if (!atBottom && autoScroll) {
+    autoScroll = false;
+    const btn = document.getElementById('btn-auto-scroll');
+    btn.classList.remove('success');
+    btn.textContent = '⬇ Auto';
+  }
+});
+
+// ── Init ───────────────────────────────────────────────────────────────────
+showEmpty(true);
+updateTgBadge();
+connect();
+</script>
+</body>
+</html>
