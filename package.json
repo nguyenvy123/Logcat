@@ -1,16 +1,51 @@
 {
   "name": "logcat-streamer",
   "version": "1.0.0",
-  "description": "Stream ADB logcat to localhost web view and Telegram",
-  "main": "src/server.js",
+  "description": "Stream ADB logcat to desktop app and Telegram",
+  "main": "electron-main.js",
   "scripts": {
     "start": "node src/server.js",
-    "dev": "node --watch src/server.js"
+    "dev": "node --watch src/server.js",
+    "app": "electron .",
+    "build:win": "electron-builder --win --x64"
   },
   "dependencies": {
-    "express": "^4.18.2",
-    "ws": "^8.16.0",
     "dotenv": "^16.4.5",
-    "node-fetch": "^3.3.2"
+    "express": "^4.18.2",
+    "node-fetch": "^3.3.2",
+    "ws": "^8.16.0"
+  },
+  "devDependencies": {
+    "electron": "^41.0.3",
+    "electron-builder": "^26.8.1"
+  },
+  "build": {
+    "appId": "com.logame.logcat-streamer",
+    "productName": "Logcat Streamer",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "electron-main.js",
+      "src/**/*",
+      "public/**/*",
+      "node_modules/**/*",
+      "package.json"
+    ],
+    "extraFiles": [
+      { "from": ".env", "to": ".env" }
+    ],
+    "win": {
+      "target": [
+        { "target": "nsis", "arch": ["x64"] }
+      ],
+      "requestedExecutionLevel": "asInvoker"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    }
   }
 }

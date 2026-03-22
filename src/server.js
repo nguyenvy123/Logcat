@@ -4,7 +4,8 @@
  * Bridges ADB logcat (or Demo mode) → Web UI (WebSocket) + Telegram.
  */
 
-require('dotenv').config();
+// Electron loads .env first and sets this flag — skip duplicate load
+if (!process.env._DOTENV_LOADED) require('dotenv').config();
 
 const http = require('http');
 const path = require('path');
@@ -195,24 +196,32 @@ function getTelegramStats() {
 
 // ─── Start ─────────────────────────────────────────────────────────────────
 
-server.listen(PORT, () => {
-  console.log(`\n🚀 Logcat Streamer running at http://localhost:${PORT}`);
-  console.log(`   Mode       : ${DEMO_MODE ? '🎭 DEMO (fake logs)' : '📱 ADB'}`);
-  if (!DEMO_MODE) {
-    console.log(`   ADB device : ${ADB_DEVICE || 'auto-detect'}`);
-    console.log(`   Tag filter : ${ADB_TAGS.length ? ADB_TAGS.join(', ') : 'ALL'}`);
-    console.log(`   Min level  : ${ADB_MIN_LEVEL}`);
-  }
-  console.log(`   Telegram   : ${telegram.enabled ? (telegramForwarding ? '✅ enabled' : '⏸ configured but paused') : '❌ not configured'}`);
-  console.log('');
+// serverReady resolves with PORT once the HTTP server is listening.
+// Electron main process awaits this before opening the BrowserWindow.
+const serverReady = new Promise((resolve) => {
+  server.listen(PORT, () => {
+    console.log(`\n🚀 Logcat Streamer running at http://localhost:${PORT}`);
+    console.log(`   Mode       : ${DEMO_MODE ? '🎭 DEMO (fake logs)' : '📱 ADB'}`);
+    if (!DEMO_MODE) {
+      console.log(`   ADB device : ${ADB_DEVICE || 'auto-detect'}`);
+      console.log(`   Tag filter : ${ADB_TAGS.length ? ADB_TAGS.join(', ') : 'ALL'}`);
+      console.log(`   Min level  : ${ADB_MIN_LEVEL}`);
+    }
+    console.log(`   Telegram   : ${telegram.enabled ? (telegramForwarding ? '✅ enabled' : '⏸ configured but paused') : '❌ not configured'}`);
+    console.log('');
 
-  logcat.start();
+    logcat.start();
 
-  if (telegram.enabled) {
-    const modeLabel = DEMO_MODE ? '🎭 Demo Mode' : `📱 Device: <code>${ADB_DEVICE || 'auto'}</code>`;
-    telegram.notify(`🟢 Logcat Streamer started\n${modeLabel}\nTags: <code>${ADB_TAGS.join(', ') || 'ALL'}</code>`);
-  }
+    if (telegram.enabled) {
+      const modeLabel = DEMO_MODE ? '🎭 Demo Mode' : `📱 Device: <code>${ADB_DEVICE || 'auto'}</code>`;
+      telegram.notify(`🟢 Logcat Streamer started\n${modeLabel}\nTags: <code>${ADB_TAGS.join(', ') || 'ALL'}</code>`);
+    }
+
+    resolve(PORT);
+  });
 });
+
+module.exports = { serverReady };
 
 // Graceful shutdown
 process.on('SIGINT', () => {
