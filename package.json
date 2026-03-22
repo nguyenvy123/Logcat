@@ -33,7 +33,7 @@
       "package.json"
     ],
     "extraFiles": [
-      { "from": ".env", "to": ".env" }
+      { "from": ".env.example", "to": ".env" }
     ],
     "win": {
       "target": [

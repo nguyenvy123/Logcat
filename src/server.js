@@ -2,6 +2,7 @@
  * server.js
  * Main entry point: Express HTTP server + WebSocket server.
  * Bridges ADB logcat (or Demo mode) → Web UI (WebSocket) + Telegram.
+ * Supports multiple ADB devices simultaneously.
  */
 
 // Electron loads .env first and sets this flag — skip duplicate load
@@ -9,6 +10,8 @@ if (!process.env._DOTENV_LOADED) require('dotenv').config();
 
 const http = require('http');
 const path = require('path');
+const fs = require('fs');
+const { execSync } = require('child_process');
 const express = require('express');
 const { WebSocketServer, WebSocket } = require('ws');
 const AdbLogcat = require('./adb-logcat');
@@ -19,8 +22,8 @@ const TelegramForwarder = require('./telegram-forwarder');
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const ADB_PATH = process.env.ADB_PATH || 'adb';
-const ADB_DEVICE = process.env.ADB_DEVICE || null; // e.g. 'emulator-5554'
-// Comma-separated tag list, e.g. "Unity,GameEngine,MyApp"
+// Comma-separated device serials — leave blank to auto-detect all
+const ADB_DEVICE_ENV = process.env.ADB_DEVICE || '';
 const ADB_TAGS = process.env.ADB_TAGS
   ? process.env.ADB_TAGS.split(',').map(t => t.trim()).filter(Boolean)
   : [];
@@ -30,17 +33,14 @@ const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '';
 const TELEGRAM_ENABLED = process.env.TELEGRAM_ENABLED !== 'false';
 
-// Demo mode: generate fake logs instead of ADB (set DEMO_MODE=true in .env)
 const DEMO_MODE = process.env.DEMO_MODE === 'true';
 const DEMO_INTERVAL_MS = parseInt(process.env.DEMO_INTERVAL_MS || '400', 10);
-
-// Max log entries kept in memory for new client catch-up
 const LOG_HISTORY_LIMIT = parseInt(process.env.LOG_HISTORY_LIMIT || '500', 10);
 
 // ─── Setup ─────────────────────────────────────────────────────────────────
 
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: '50mb' }));
 app.use(express.static(path.join(__dirname, '../public')));
 
 const server = http.createServer(app);
@@ -52,26 +52,120 @@ const telegram = new TelegramForwarder({
   enabled: TELEGRAM_ENABLED,
 });
 
-// Use DemoLogGenerator when DEMO_MODE=true, otherwise real ADB
-const logSource = DEMO_MODE
-  ? new DemoLogGenerator({ intervalMs: DEMO_INTERVAL_MS })
-  : new AdbLogcat({ adbPath: ADB_PATH, deviceSerial: ADB_DEVICE, tags: ADB_TAGS, minLevel: ADB_MIN_LEVEL });
-
-// Keep 'logcat' alias so rest of code stays unchanged
-const logcat = logSource;
-
-// In-memory ring buffer for recent logs (new clients get history)
+// In-memory ring buffer for recent logs
 const logHistory = [];
-
-// Telegram forwarding toggle (can be toggled via API)
 let telegramForwarding = TELEGRAM_ENABLED && telegram.enabled;
+
+// Active logcat instances: Map<serial, AdbLogcat>
+const logcatInstances = new Map();
+
+// ─── Device Detection ──────────────────────────────────────────────────────
+
+function getConnectedDevices() {
+  try {
+    const output = execSync(`"${ADB_PATH}" devices`, { timeout: 5000 }).toString();
+    return output.split('\n')
+      .slice(1)
+      .map(line => line.trim())
+      .filter(line => line.endsWith('\tdevice'))
+      .map(line => line.split('\t')[0]);
+  } catch (e) {
+    console.error('[ADB] Failed to list devices:', e.message);
+    return [];
+  }
+}
+
+function resolveDevices() {
+  if (ADB_DEVICE_ENV) {
+    return ADB_DEVICE_ENV.split(',').map(s => s.trim()).filter(Boolean);
+  }
+  return getConnectedDevices();
+}
+
+// ─── Logcat Management ─────────────────────────────────────────────────────
+
+function attachLogcat(serial) {
+  if (logcatInstances.has(serial)) return;
+
+  const instance = new AdbLogcat({
+    adbPath: ADB_PATH,
+    deviceSerial: serial,
+    tags: ADB_TAGS,
+    minLevel: ADB_MIN_LEVEL,
+  });
+
+  instance.on('log', (entry) => {
+    entry.device = serial;
+    logHistory.push(entry);
+    if (logHistory.length > LOG_HISTORY_LIMIT) logHistory.shift();
+    broadcast({ type: 'log', data: entry });
+    if (telegramForwarding) telegram.enqueue(entry);
+  });
+
+  instance.on('error_msg', (msg) => {
+    console.error(`[ADB:${serial}] stderr:`, msg);
+    broadcast({ type: 'adb_error', data: `[${serial}] ${msg}` });
+  });
+
+  instance.on('spawn_error', (err) => {
+    const msg = `Failed to start adb for ${serial}: ${err.message}`;
+    console.error('[ADB]', msg);
+    broadcast({ type: 'adb_error', data: msg });
+  });
+
+  instance.on('close', (code) => {
+    console.log(`[ADB:${serial}] exited with code ${code}`);
+    broadcast({ type: 'adb_closed', data: { code, device: serial } });
+    logcatInstances.delete(serial);
+  });
+
+  logcatInstances.set(serial, instance);
+  instance.start();
+  console.log(`[ADB] Started logcat for device: ${serial}`);
+}
+
+function startAllDevices() {
+  if (DEMO_MODE) return;
+  const devices = resolveDevices();
+  if (devices.length === 0) {
+    console.warn('[ADB] No devices found. Waiting...');
+    broadcast({ type: 'adb_error', data: 'No ADB devices connected.' });
+    return;
+  }
+  console.log(`[ADB] Found ${devices.length} device(s): ${devices.join(', ')}`);
+  devices.forEach(attachLogcat);
+  broadcast({ type: 'devices', data: devices });
+}
+
+function stopAllDevices() {
+  logcatInstances.forEach((inst, serial) => {
+    inst.stop();
+    console.log(`[ADB] Stopped logcat for device: ${serial}`);
+  });
+  logcatInstances.clear();
+}
+
+// ─── Demo Mode ─────────────────────────────────────────────────────────────
+
+let demoSource = null;
+if (DEMO_MODE) {
+  demoSource = new DemoLogGenerator({ intervalMs: DEMO_INTERVAL_MS });
+  demoSource.on('log', (entry) => {
+    entry.device = 'demo';
+    logHistory.push(entry);
+    if (logHistory.length > LOG_HISTORY_LIMIT) logHistory.shift();
+    broadcast({ type: 'log', data: entry });
+    if (telegramForwarding) telegram.enqueue(entry);
+  });
+}
 
 // ─── WebSocket ─────────────────────────────────────────────────────────────
 
 wss.on('connection', (ws) => {
   console.log('[WS] Client connected');
 
-  // Send current config state
+  const devices = DEMO_MODE ? ['demo'] : [...logcatInstances.keys()];
+
   ws.send(JSON.stringify({
     type: 'config',
     data: {
@@ -80,10 +174,10 @@ wss.on('connection', (ws) => {
       telegramEnabled: telegramForwarding,
       telegramConfigured: telegram.enabled,
       historyCount: logHistory.length,
+      devices,
     },
   }));
 
-  // Replay recent log history
   if (logHistory.length > 0) {
     ws.send(JSON.stringify({ type: 'history', data: logHistory }));
   }
@@ -92,7 +186,7 @@ wss.on('connection', (ws) => {
     try {
       const cmd = JSON.parse(msg.toString());
       handleClientCommand(cmd, ws);
-    } catch (_) { /* ignore invalid JSON */ }
+    } catch (_) {}
   });
 
   ws.on('close', () => console.log('[WS] Client disconnected'));
@@ -101,9 +195,7 @@ wss.on('connection', (ws) => {
 function broadcast(message) {
   const payload = JSON.stringify(message);
   wss.clients.forEach(client => {
-    if (client.readyState === WebSocket.OPEN) {
-      client.send(payload);
-    }
+    if (client.readyState === WebSocket.OPEN) client.send(payload);
   });
 }
 
@@ -118,74 +210,50 @@ function handleClientCommand(cmd, ws) {
   }
 }
 
-// ─── Logcat Events ─────────────────────────────────────────────────────────
-
-logcat.on('log', (entry) => {
-  // Add to ring buffer
-  logHistory.push(entry);
-  if (logHistory.length > LOG_HISTORY_LIMIT) {
-    logHistory.shift();
-  }
-
-  // Broadcast to all WebSocket clients
-  broadcast({ type: 'log', data: entry });
-
-  // Forward to Telegram if enabled
-  if (telegramForwarding) {
-    telegram.enqueue(entry);
-  }
-});
-
-logcat.on('error_msg', (msg) => {
-  console.error('[ADB stderr]', msg);
-  broadcast({ type: 'adb_error', data: msg });
-});
-
-logcat.on('spawn_error', (err) => {
-  const msg = `Failed to start adb: ${err.message}. Make sure adb is in PATH.`;
-  console.error('[ADB]', msg);
-  broadcast({ type: 'adb_error', data: msg });
-});
-
-logcat.on('close', (code) => {
-  console.log(`[ADB] logcat process exited with code ${code}`);
-  broadcast({ type: 'adb_closed', data: { code } });
-});
-
 // ─── REST API ──────────────────────────────────────────────────────────────
 
-// GET /api/status
 app.get('/api/status', (req, res) => {
   res.json({
-    logcat: { running: logcat.running, tags: ADB_TAGS, minLevel: ADB_MIN_LEVEL },
+    devices: [...logcatInstances.keys()],
+    tags: ADB_TAGS,
+    minLevel: ADB_MIN_LEVEL,
     telegram: { configured: telegram.enabled, forwarding: telegramForwarding, ...telegram.stats() },
     clients: wss.clients.size,
     historyCount: logHistory.length,
   });
 });
 
-// POST /api/telegram/toggle
 app.post('/api/telegram/toggle', (req, res) => {
-  if (!telegram.enabled) {
-    return res.status(400).json({ error: 'Telegram not configured' });
-  }
+  if (!telegram.enabled) return res.status(400).json({ error: 'Telegram not configured' });
   telegramForwarding = !telegramForwarding;
   broadcast({ type: 'telegram_toggled', data: { enabled: telegramForwarding } });
   res.json({ telegramForwarding });
 });
 
-// POST /api/logcat/restart
 app.post('/api/logcat/restart', (req, res) => {
-  logcat.stop();
-  setTimeout(() => logcat.start(), 500);
+  stopAllDevices();
+  setTimeout(startAllDevices, 500);
   res.json({ status: 'restarting' });
 });
 
-// POST /api/history/clear
 app.post('/api/history/clear', (req, res) => {
   logHistory.length = 0;
   broadcast({ type: 'cleared' });
   res.json({ status: 'cleared' });
+});
+
+app.post('/api/export', (req, res) => {
+  const logsDir = path.join(__dirname, '../logs');
+  if (!fs.existsSync(logsDir)) fs.mkdirSync(logsDir, { recursive: true });
+
+  const now = new Date();
+  const ts = now.toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  const filename = `logcat_${ts}.txt`;
+  const filepath = path.join(logsDir, filename);
+
+  const lines = (req.body.lines || []);
+  fs.writeFileSync(filepath, lines.join('\n'), 'utf8');
+  res.json({ status: 'saved', filename, path: filepath, count: lines.length });
 });
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
@@ -196,25 +264,25 @@ function getTelegramStats() {
 
 // ─── Start ─────────────────────────────────────────────────────────────────
 
-// serverReady resolves with PORT once the HTTP server is listening.
-// Electron main process awaits this before opening the BrowserWindow.
 const serverReady = new Promise((resolve) => {
   server.listen(PORT, () => {
     console.log(`\n🚀 Logcat Streamer running at http://localhost:${PORT}`);
-    console.log(`   Mode       : ${DEMO_MODE ? '🎭 DEMO (fake logs)' : '📱 ADB'}`);
+    console.log(`   Mode       : ${DEMO_MODE ? '🎭 DEMO (fake logs)' : '📱 ADB (multi-device)'}`);
     if (!DEMO_MODE) {
-      console.log(`   ADB device : ${ADB_DEVICE || 'auto-detect'}`);
       console.log(`   Tag filter : ${ADB_TAGS.length ? ADB_TAGS.join(', ') : 'ALL'}`);
       console.log(`   Min level  : ${ADB_MIN_LEVEL}`);
     }
-    console.log(`   Telegram   : ${telegram.enabled ? (telegramForwarding ? '✅ enabled' : '⏸ configured but paused') : '❌ not configured'}`);
+    console.log(`   Telegram   : ${telegram.enabled ? (telegramForwarding ? '✅ enabled' : '⏸ paused') : '❌ not configured'}`);
     console.log('');
 
-    logcat.start();
+    if (DEMO_MODE) {
+      demoSource.start();
+    } else {
+      startAllDevices();
+    }
 
     if (telegram.enabled) {
-      const modeLabel = DEMO_MODE ? '🎭 Demo Mode' : `📱 Device: <code>${ADB_DEVICE || 'auto'}</code>`;
-      telegram.notify(`🟢 Logcat Streamer started\n${modeLabel}\nTags: <code>${ADB_TAGS.join(', ') || 'ALL'}</code>`);
+      telegram.notify(`🟢 Logcat Streamer started\nTags: <code>${ADB_TAGS.join(', ') || 'ALL'}</code>`);
     }
 
     resolve(PORT);
@@ -223,10 +291,10 @@ const serverReady = new Promise((resolve) => {
 
 module.exports = { serverReady };
 
-// Graceful shutdown
 process.on('SIGINT', () => {
   console.log('\n[Server] Shutting down...');
-  logcat.stop();
+  stopAllDevices();
+  if (demoSource) demoSource.stop();
   telegram.stop();
   server.close(() => process.exit(0));
 });

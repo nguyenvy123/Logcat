@@ -103,6 +103,7 @@
     .log-row.level-F { border-color: var(--purple); background: rgba(188,140,255,.08); }
 
     .col-ts { color: var(--text-dim); min-width: 160px; flex-shrink: 0; font-size: 11px; padding-right: 8px; }
+    .col-device { min-width: 90px; max-width: 120px; flex-shrink: 0; font-size: 10px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-right: 8px; border-radius: 3px; text-align: center; }
     .col-level { min-width: 20px; flex-shrink: 0; font-weight: 700; text-align: center; margin-right: 6px; }
     .col-tag { min-width: 120px; max-width: 180px; flex-shrink: 0; color: var(--orange); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-right: 8px; }
     .col-msg { flex: 1; word-break: break-all; white-space: pre-wrap; }
@@ -129,6 +130,14 @@
     }
     #empty-state .icon { font-size: 40px; }
 
+    /* ── Device Dropdown ── */
+    #device-select {
+      background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+      color: var(--text); padding: 4px 8px; font-family: var(--font-mono); font-size: 12px;
+      cursor: pointer; outline: none; max-width: 180px;
+    }
+    #device-select:focus { border-color: var(--accent); }
+
     /* ── Telegram Badge ── */
     #tg-badge {
       padding: 3px 8px; border-radius: 12px; font-size: 11px; cursor: pointer;
@@ -147,16 +156,12 @@
   <div class="sep"></div>
   <input id="search" type="text" placeholder="Search logs…" autocomplete="off" spellcheck="false" />
   <div class="sep"></div>
-  <!-- Level toggle buttons -->
-  <button class="level-btn active" data-level="V">V</button>
-  <button class="level-btn active" data-level="D">D</button>
-  <button class="level-btn active" data-level="I">I</button>
-  <button class="level-btn active" data-level="W">W</button>
-  <button class="level-btn active" data-level="E">E</button>
-  <button class="level-btn active" data-level="F">F</button>
-  <div class="sep"></div>
+  <select id="device-select" title="Chọn máy ảo">
+
+  </select>
   <button id="tg-badge" class="no" title="Toggle Telegram forwarding">✈ TG: –</button>
   <button class="btn" id="btn-auto-scroll" title="Toggle auto-scroll">⬇ Auto</button>
+  <button class="btn" id="btn-export">💾 Lấy log</button>
   <button class="btn danger" id="btn-clear">🗑 Clear</button>
   <button class="btn" id="btn-restart-adb">↺ ADB</button>
 </div>
@@ -182,11 +187,24 @@
 let autoScroll = true;
 let searchTerm = '';
 let activeFilters = new Set(['V', 'D', 'I', 'W', 'E', 'F']);
+let selectedDevice = ''; // '' = all devices
+let knownDevices = new Set();
 let telegramEnabled = false;
 let telegramConfigured = false;
 let stats = { total: 0, w: 0, e: 0, f: 0, shown: 0 };
 let ws = null;
 let reconnectTimer = null;
+
+// Colors assigned per device (cycles through palette)
+const DEVICE_COLORS = ['#58a6ff','#3fb950','#ffa657','#bc8cff','#f85149','#39d353'];
+const deviceColorMap = {};
+function deviceColor(serial) {
+  if (!deviceColorMap[serial]) {
+    const idx = Object.keys(deviceColorMap).length % DEVICE_COLORS.length;
+    deviceColorMap[serial] = DEVICE_COLORS[idx];
+  }
+  return deviceColorMap[serial];
+}
 
 const container = document.getElementById('log-container');
 const emptyState = document.getElementById('empty-state');
@@ -221,6 +239,10 @@ function handleMessage(msg) {
       telegramConfigured = msg.data.telegramConfigured;
       telegramEnabled = msg.data.telegramEnabled;
       updateTgBadge();
+      if (msg.data.devices) msg.data.devices.forEach(registerDevice);
+      break;
+    case 'devices':
+      msg.data.forEach(registerDevice);
       break;
     case 'history':
       msg.data.forEach(appendLog);
@@ -248,6 +270,7 @@ function handleMessage(msg) {
 // ── Log Rendering ──────────────────────────────────────────────────────────
 function appendLog(entry) {
   showEmpty(false);
+  if (entry.device) registerDevice(entry.device);
 
   stats.total++;
   if (entry.level === 'W') stats.w++;
@@ -257,14 +280,18 @@ function appendLog(entry) {
   const row = document.createElement('div');
   row.className = `log-row level-${entry.level} lv-${entry.level}`;
   row.dataset.level = entry.level;
+  row.dataset.device = entry.device || '';
   row.dataset.raw = `${entry.tag} ${entry.message}`.toLowerCase();
 
-  const visible = isVisible(entry.level, row.dataset.raw);
+  const visible = isVisible(entry.level, row.dataset.raw, entry.device);
   if (!visible) row.classList.add('hidden');
   else stats.shown++;
 
+  const color = entry.device ? deviceColor(entry.device) : 'var(--text-dim)';
+  const deviceLabel = entry.device ? entry.device.replace('emulator-', 'emu-') : '';
   row.innerHTML = `
     <span class="col-ts">${escHtml(entry.timestamp || '')}</span>
+    <span class="col-device" style="color:${color}" title="${escHtml(entry.device || '')}">${escHtml(deviceLabel)}</span>
     <span class="col-level">${entry.level}</span>
     <span class="col-tag" title="${escHtml(entry.tag)}">${escHtml(entry.tag)}</span>
     <span class="col-msg">${highlight(escHtml(entry.message))}</span>
@@ -284,9 +311,29 @@ function appendSystemMsg(text) {
   if (autoScroll) row.scrollIntoView({ block: 'end' });
 }
 
+// ── Device Dropdown ────────────────────────────────────────────────────────
+function registerDevice(serial) {
+  if (knownDevices.has(serial)) return;
+  knownDevices.add(serial);
+
+  const sel = document.getElementById('device-select');
+  const opt = document.createElement('option');
+  opt.value = serial;
+  opt.textContent = `📱 ${serial}`;
+  sel.appendChild(opt);
+
+  // Auto-select first device
+  if (knownDevices.size === 1) {
+    sel.value = serial;
+    selectedDevice = serial;
+    refilter();
+  }
+}
+
 // ── Filtering ──────────────────────────────────────────────────────────────
-function isVisible(level, rawLower) {
+function isVisible(level, rawLower, device) {
   if (!activeFilters.has(level)) return false;
+  if (selectedDevice && device !== selectedDevice) return false;
   if (searchTerm && !rawLower.includes(searchTerm)) return false;
   return true;
 }
@@ -294,7 +341,7 @@ function isVisible(level, rawLower) {
 function refilter() {
   let shown = 0;
   container.querySelectorAll('.log-row[data-level]').forEach(row => {
-    const visible = isVisible(row.dataset.level, row.dataset.raw || '');
+    const visible = isVisible(row.dataset.level, row.dataset.raw || '', row.dataset.device);
     row.classList.toggle('hidden', !visible);
     if (visible) shown++;
 
@@ -361,24 +408,44 @@ document.getElementById('search').addEventListener('input', (e) => {
   refilter();
 });
 
-document.querySelectorAll('.level-btn').forEach(btn => {
-  btn.addEventListener('click', () => {
-    const lvl = btn.dataset.level;
-    if (activeFilters.has(lvl)) {
-      activeFilters.delete(lvl);
-      btn.classList.remove('active');
-    } else {
-      activeFilters.add(lvl);
-      btn.classList.add('active');
-    }
-    refilter();
-  });
+document.getElementById('device-select').addEventListener('change', (e) => {
+  selectedDevice = e.target.value;
+  refilter();
 });
 
 document.getElementById('btn-auto-scroll').addEventListener('click', (e) => {
   autoScroll = !autoScroll;
   e.target.classList.toggle('success', autoScroll);
   e.target.textContent = autoScroll ? '⬇ Auto ✓' : '⬇ Auto';
+});
+
+document.getElementById('btn-export').addEventListener('click', async () => {
+  const btn = document.getElementById('btn-export');
+  btn.textContent = '⏳ Đang lưu…';
+  btn.disabled = true;
+  try {
+    // Collect only visible (non-hidden) log rows from DOM
+    const lines = [];
+    container.querySelectorAll('.log-row[data-level]:not(.hidden)').forEach(row => {
+      const ts = row.querySelector('.col-ts')?.textContent || '';
+      const level = row.querySelector('.col-level')?.textContent || '';
+      const tag = row.querySelector('.col-tag')?.textContent || '';
+      const msg = row.querySelector('.col-msg')?.textContent || '';
+      lines.push(`${ts}  ${level}  ${tag}: ${msg}`);
+    });
+    const res = await fetch('/api/export', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ lines }),
+    });
+    const data = await res.json();
+    appendSystemMsg(`💾 Đã lưu ${data.count} dòng → ${data.path}`);
+    btn.textContent = '✅ Đã lưu!';
+    setTimeout(() => { btn.textContent = '💾 Lấy log'; btn.disabled = false; }, 2000);
+  } catch (e) {
+    btn.textContent = '💾 Lấy log';
+    btn.disabled = false;
+  }
 });
 
 document.getElementById('btn-clear').addEventListener('click', () => {
