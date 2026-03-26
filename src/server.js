@@ -243,17 +243,14 @@ app.post('/api/history/clear', (req, res) => {
 });
 
 app.post('/api/export', (req, res) => {
-  const logsDir = path.join(__dirname, '../logs');
-  if (!fs.existsSync(logsDir)) fs.mkdirSync(logsDir, { recursive: true });
-
-  const now = new Date();
-  const ts = now.toISOString().replace(/[:.]/g, '-').slice(0, 19);
-  const filename = `logcat_${ts}.txt`;
-  const filepath = path.join(logsDir, filename);
-
-  const lines = (req.body.lines || []);
+  const { lines = [], filepath } = req.body;
+  if (!filepath) {
+    return res.status(400).json({ error: 'filepath is required' });
+  }
+  const dir = path.dirname(filepath);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(filepath, lines.join('\n'), 'utf8');
-  res.json({ status: 'saved', filename, path: filepath, count: lines.length });
+  res.json({ status: 'saved', path: filepath, count: lines.length });
 });
 
 // ─── Helpers ───────────────────────────────────────────────────────────────

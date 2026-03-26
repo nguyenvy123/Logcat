@@ -421,30 +421,56 @@ document.getElementById('btn-auto-scroll').addEventListener('click', (e) => {
 
 document.getElementById('btn-export').addEventListener('click', async () => {
   const btn = document.getElementById('btn-export');
-  btn.textContent = '⏳ Đang lưu…';
-  btn.disabled = true;
-  try {
-    // Collect only visible (non-hidden) log rows from DOM
-    const lines = [];
-    container.querySelectorAll('.log-row[data-level]:not(.hidden)').forEach(row => {
-      const ts = row.querySelector('.col-ts')?.textContent || '';
-      const level = row.querySelector('.col-level')?.textContent || '';
-      const tag = row.querySelector('.col-tag')?.textContent || '';
-      const msg = row.querySelector('.col-msg')?.textContent || '';
-      lines.push(`${ts}  ${level}  ${tag}: ${msg}`);
-    });
-    const res = await fetch('/api/export', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ lines }),
-    });
-    const data = await res.json();
-    appendSystemMsg(`💾 Đã lưu ${data.count} dòng → ${data.path}`);
+  // Collect only visible (non-hidden) log rows from DOM
+  const lines = [];
+  container.querySelectorAll('.log-row[data-level]:not(.hidden)').forEach(row => {
+    const ts = row.querySelector('.col-ts')?.textContent || '';
+    const level = row.querySelector('.col-level')?.textContent || '';
+    const tag = row.querySelector('.col-tag')?.textContent || '';
+    const msg = row.querySelector('.col-msg')?.textContent || '';
+    lines.push(`${ts}  ${level}  ${tag}: ${msg}`);
+  });
+  if (lines.length === 0) {
+    appendSystemMsg('⚠️ Không có log nào để lưu.');
+    return;
+  }
+  const now = new Date();
+  const ts = now.toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  const defaultName = `logcat_${ts}.txt`;
+
+  // Electron: show Save As dialog to pick folder/filename
+  if (window.electronAPI && window.electronAPI.showSaveDialog) {
+    const filepath = await window.electronAPI.showSaveDialog(defaultName);
+    if (!filepath) return; // user canceled
+    btn.textContent = '⏳ Đang lưu…';
+    btn.disabled = true;
+    try {
+      const res = await fetch('/api/export', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ lines, filepath }),
+      });
+      const data = await res.json();
+      appendSystemMsg(`💾 Đã lưu ${data.count} dòng → ${data.path}`);
+      btn.textContent = '✅ Đã lưu!';
+      setTimeout(() => { btn.textContent = '💾 Lấy log'; btn.disabled = false; }, 2000);
+    } catch (e) {
+      appendSystemMsg('❌ Lưu file thất bại.');
+      btn.textContent = '💾 Lấy log';
+      btn.disabled = false;
+    }
+  } else {
+    // Browser fallback: download via blob
+    const blob = new Blob([lines.join('\n')], { type: 'text/plain' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = defaultName;
+    a.click();
+    URL.revokeObjectURL(a.href);
+    appendSystemMsg(`💾 Đã xuất ${lines.length} dòng → ${defaultName}`);
     btn.textContent = '✅ Đã lưu!';
+    btn.disabled = true;
     setTimeout(() => { btn.textContent = '💾 Lấy log'; btn.disabled = false; }, 2000);
-  } catch (e) {
-    btn.textContent = '💾 Lấy log';
-    btn.disabled = false;
   }
 });
 

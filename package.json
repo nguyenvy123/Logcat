@@ -27,6 +27,7 @@
     },
     "files": [
       "electron-main.js",
+      "preload.js",
       "src/**/*",
       "public/**/*",
       "node_modules/**/*",

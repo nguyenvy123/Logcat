@@ -4,7 +4,7 @@
  * Features: BrowserWindow, System Tray, Auto-start on Windows login.
  */
 
-const { app, BrowserWindow, Tray, Menu, nativeImage, shell } = require('electron');
+const { app, BrowserWindow, Tray, Menu, nativeImage, shell, dialog, ipcMain } = require('electron');
 const path = require('path');
 const fs   = require('fs');
 
@@ -64,6 +64,7 @@ function createWindow() {
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
+      preload: path.join(__dirname, 'preload.js'),
     },
   });
 
@@ -127,6 +128,20 @@ function createTray() {
   // Double-click tray icon → show window
   tray.on('double-click', () => { mainWindow.show(); mainWindow.focus(); });
 }
+
+// ── IPC: Save Dialog ────────────────────────────────────────────────────────
+ipcMain.handle('show-save-dialog', async (_event, defaultName) => {
+  const result = await dialog.showSaveDialog(mainWindow, {
+    title: 'Lưu log',
+    defaultPath: defaultName,
+    filters: [
+      { name: 'Text Files', extensions: ['txt'] },
+      { name: 'All Files', extensions: ['*'] },
+    ],
+  });
+  if (result.canceled) return null;
+  return result.filePath;
+});
 
 // ── App Init ─────────────────────────────────────────────────────────────────
 async function start() {
