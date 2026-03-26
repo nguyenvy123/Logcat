@@ -4,9 +4,10 @@
  * Features: BrowserWindow, System Tray, Auto-start on Windows login.
  */
 
-const { app, BrowserWindow, Tray, Menu, nativeImage, shell, dialog, ipcMain } = require('electron');
+const { app, BrowserWindow, Tray, Menu, nativeImage, shell, dialog, ipcMain } = require('./src/electron-api').loadElectronMainApi();
 const path = require('path');
 const fs   = require('fs');
+const { registerSingleInstance } = require('./src/single-instance');
 
 const IS_DEV = !app.isPackaged;
 
@@ -25,6 +26,17 @@ process.env._DOTENV_LOADED = '1';
 let mainWindow  = null;
 let tray        = null;
 let serverPort  = parseInt(process.env.PORT || '3000', 10);
+
+function focusMainWindow() {
+  if (!mainWindow) return;
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  if (!mainWindow.isVisible()) mainWindow.show();
+  mainWindow.focus();
+}
+
+if (!registerSingleInstance(app, { focusMainWindow })) {
+  process.exit(0);
+}
 
 // ── Icon (programmatic green circle — no external PNG needed) ────────────────
 function makeIcon(size) {
@@ -99,7 +111,7 @@ function createTray() {
       { type: 'separator' },
       {
         label: 'Mở ứng dụng',
-        click: () => { mainWindow.show(); mainWindow.focus(); },
+        click: () => focusMainWindow(),
       },
       {
         label: 'Mở trong trình duyệt',
@@ -126,7 +138,7 @@ function createTray() {
   tray.setContextMenu(buildMenu());
 
   // Double-click tray icon → show window
-  tray.on('double-click', () => { mainWindow.show(); mainWindow.focus(); });
+  tray.on('double-click', () => focusMainWindow());
 }
 
 // ── IPC: Save Dialog ────────────────────────────────────────────────────────

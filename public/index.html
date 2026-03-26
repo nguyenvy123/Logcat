@@ -189,6 +189,7 @@ let searchTerm = '';
 let activeFilters = new Set(['V', 'D', 'I', 'W', 'E', 'F']);
 let selectedDevice = ''; // '' = all devices
 let knownDevices = new Set();
+let deviceLabels = new Map();
 let telegramEnabled = false;
 let telegramConfigured = false;
 let stats = { total: 0, w: 0, e: 0, f: 0, shown: 0 };
@@ -270,7 +271,12 @@ function handleMessage(msg) {
 // ── Log Rendering ──────────────────────────────────────────────────────────
 function appendLog(entry) {
   showEmpty(false);
-  if (entry.device) registerDevice(entry.device);
+  if (entry.device) {
+    registerDevice({
+      serial: entry.device,
+      displayName: entry.deviceName || entry.device,
+    });
+  }
 
   stats.total++;
   if (entry.level === 'W') stats.w++;
@@ -288,7 +294,9 @@ function appendLog(entry) {
   else stats.shown++;
 
   const color = entry.device ? deviceColor(entry.device) : 'var(--text-dim)';
-  const deviceLabel = entry.device ? entry.device.replace('emulator-', 'emu-') : '';
+  const deviceLabel = entry.device
+    ? (entry.deviceName || deviceLabels.get(entry.device) || entry.device)
+    : '';
   row.innerHTML = `
     <span class="col-ts">${escHtml(entry.timestamp || '')}</span>
     <span class="col-device" style="color:${color}" title="${escHtml(entry.device || '')}">${escHtml(deviceLabel)}</span>
@@ -323,6 +331,35 @@ function registerDevice(serial) {
   sel.appendChild(opt);
 
   // Auto-select first device
+  if (knownDevices.size === 1) {
+    sel.value = serial;
+    selectedDevice = serial;
+    refilter();
+  }
+}
+
+function registerDevice(device) {
+  const serial = typeof device === 'string' ? device : device.serial;
+  const displayName = typeof device === 'string' ? device : (device.displayName || device.serial);
+  if (!serial) return;
+
+  deviceLabels.set(serial, displayName);
+
+  const sel = document.getElementById('device-select');
+  const existingOption = [...sel.options].find((opt) => opt.value === serial);
+  if (existingOption) {
+    existingOption.textContent = `📱 ${displayName}`;
+    return;
+  }
+
+  if (knownDevices.has(serial)) return;
+  knownDevices.add(serial);
+
+  const opt = document.createElement('option');
+  opt.value = serial;
+  opt.textContent = `📱 ${displayName}`;
+  sel.appendChild(opt);
+
   if (knownDevices.size === 1) {
     sel.value = serial;
     selectedDevice = serial;

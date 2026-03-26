@@ -17,6 +17,7 @@ const { WebSocketServer, WebSocket } = require('ws');
 const AdbLogcat = require('./adb-logcat');
 const DemoLogGenerator = require('./demo-log-generator');
 const TelegramForwarder = require('./telegram-forwarder');
+const { getDeviceMetadata, loadLdPlayerDisplayMap } = require('./ldplayer-instance-map');
 
 // ─── Config ────────────────────────────────────────────────────────────────
 
@@ -58,6 +59,7 @@ let telegramForwarding = TELEGRAM_ENABLED && telegram.enabled;
 
 // Active logcat instances: Map<serial, AdbLogcat>
 const logcatInstances = new Map();
+let ldPlayerDisplayMap = new Map();
 
 // ─── Device Detection ──────────────────────────────────────────────────────
 
@@ -82,6 +84,10 @@ function resolveDevices() {
   return getConnectedDevices();
 }
 
+function getDeviceList() {
+  return [...logcatInstances.keys()].map(serial => getDeviceMetadata(serial, ldPlayerDisplayMap));
+}
+
 // ─── Logcat Management ─────────────────────────────────────────────────────
 
 function attachLogcat(serial) {
@@ -95,7 +101,9 @@ function attachLogcat(serial) {
   });
 
   instance.on('log', (entry) => {
-    entry.device = serial;
+    const device = getDeviceMetadata(serial, ldPlayerDisplayMap);
+    entry.device = device.serial;
+    entry.deviceName = device.displayName;
     logHistory.push(entry);
     if (logHistory.length > LOG_HISTORY_LIMIT) logHistory.shift();
     broadcast({ type: 'log', data: entry });
@@ -126,6 +134,7 @@ function attachLogcat(serial) {
 
 function startAllDevices() {
   if (DEMO_MODE) return;
+  ldPlayerDisplayMap = loadLdPlayerDisplayMap({ adbPath: ADB_PATH });
   const devices = resolveDevices();
   if (devices.length === 0) {
     console.warn('[ADB] No devices found. Waiting...');
@@ -134,7 +143,7 @@ function startAllDevices() {
   }
   console.log(`[ADB] Found ${devices.length} device(s): ${devices.join(', ')}`);
   devices.forEach(attachLogcat);
-  broadcast({ type: 'devices', data: devices });
+  broadcast({ type: 'devices', data: devices.map(serial => getDeviceMetadata(serial, ldPlayerDisplayMap)) });
 }
 
 function stopAllDevices() {
@@ -152,6 +161,7 @@ if (DEMO_MODE) {
   demoSource = new DemoLogGenerator({ intervalMs: DEMO_INTERVAL_MS });
   demoSource.on('log', (entry) => {
     entry.device = 'demo';
+    entry.deviceName = 'demo';
     logHistory.push(entry);
     if (logHistory.length > LOG_HISTORY_LIMIT) logHistory.shift();
     broadcast({ type: 'log', data: entry });
@@ -164,7 +174,7 @@ if (DEMO_MODE) {
 wss.on('connection', (ws) => {
   console.log('[WS] Client connected');
 
-  const devices = DEMO_MODE ? ['demo'] : [...logcatInstances.keys()];
+  const devices = DEMO_MODE ? [{ serial: 'demo', displayName: 'demo' }] : getDeviceList();
 
   ws.send(JSON.stringify({
     type: 'config',
@@ -214,7 +224,7 @@ function handleClientCommand(cmd, ws) {
 
 app.get('/api/status', (req, res) => {
   res.json({
-    devices: [...logcatInstances.keys()],
+    devices: getDeviceList(),
     tags: ADB_TAGS,
     minLevel: ADB_MIN_LEVEL,
     telegram: { configured: telegram.enabled, forwarding: telegramForwarding, ...telegram.stats() },
